@@ -4151,6 +4151,14 @@ const handleToolCall = async (
       case "react": {
         assertAllowedChat(args.chat_id as string);
         if (!sock) throw new Error("WhatsApp not connected");
+        // A reaction on a permission request IS an answer to it, and only
+        // the human may give one. Refused here as well as ignored on arrival
+        // (handlePermissionReactions): the id is not secret - a quote-reply
+        // to the request hands it to the agent as reply_to_id.
+        if (permissionMessageMap.has(args.message_id as string))
+          throw new Error(
+            "refusing to react to a permission request - only the user can answer it",
+          );
         const key = lookupKey(
           args.chat_id as string,
           args.message_id as string,
@@ -5289,7 +5297,17 @@ function routeFromMe(msg: WAMessage): SelfCommandRoute {
       id: msg.key.id,
       chatJid: msg.key.remoteJid ?? "",
       ownForms: [ownJid, lid],
-      dmDisabled: () => loadAccess().dmPolicy === "disabled",
+      // The rule logOwnerHandReply applies: the owner's own number must be
+      // allowlisted, or every reply into the chat would be refused by
+      // assertAllowedChat and the command would sit unreplied (static mode
+      // never auto-adds it).
+      blocked: () => {
+        const access = loadAccess();
+        return (
+          access.dmPolicy === "disabled" ||
+          !isAllowedJid(ownJid, access.allowFrom)
+        );
+      },
       hasContent: () => {
         const content = normalizeMessageContent(msg.message) ?? msg.message;
         return !!(extractText(content) || classifyMedia(content));
@@ -5330,15 +5348,26 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
         msg.key.remoteJid ?? "",
         extractText(msg.message),
       )
-    )
+    ) {
+      // Taken, so a replay of it (a reconnect's append batch can come back
+      // as live) is a duplicate, not a self-command: the claim fails the
+      // second time, and the answer would reach the agent as a message.
+      if (msg.key.id) seenSelfCommand(msg.key.id);
       return;
+    }
     const route = routeFromMe(msg);
     if (route === "hand-reply") return logOwnerHandReply(msg);
     if (route === "duplicate") return;
     selfCommand = true;
   } else if (wasSentByServer(msg.key.id)) return;
 
-  const remoteJid = msg.key.remoteJid;
+  // A self-command's chat is canonicalized to the owner's phone jid. The
+  // note-to-self arrives under either form (usually the @lid), and one chat
+  // under two chat_ids would split its unreplied count and catch_up history
+  // and leave "typing…" up after a reply under the other form. The phone jid
+  // is the form this server already sends into that chat (access.owner, the
+  // permission requests), so replies take a proven path.
+  const remoteJid = selfCommand && ownJid ? ownJid : msg.key.remoteJid;
   // Status updates / channel broadcasts aren't DMs or groups — treating them
   // as a DM would burn a pairing slot and, in pairing mode, publish the
   // "pairing required" reply as your own public status update.
@@ -5349,10 +5378,8 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   )
     return;
   const isGroup = remoteJid.endsWith("@g.us");
-  // A self-command's chat is often the owner's @lid; their phone jid is the
-  // one address every other line about the owner already uses.
   const senderJid = selfCommand
-    ? ownJid || jidNormalizedUser(remoteJid)
+    ? remoteJid
     : isGroup
       ? jidNormalizedUser(msg.key.participant ?? remoteJid)
       : jidNormalizedUser(remoteJid);
@@ -5380,7 +5407,8 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   // Gate check. Not for a self-command: the owner is the linked account
   // itself, and gate() is the INBOUND path that mints pairing codes - the
   // same reason logOwnerHandReply never calls it. routeFromMe already
-  // applied the one gate rule that still binds the owner (dmPolicy disabled).
+  // applied the gate rules that still bind the owner (dmPolicy disabled,
+  // their own number allowlisted).
   const result: GateResult = selfCommand
     ? { action: "deliver", access: loadAccess() }
     : gate(remoteJid, senderJid, text, mentionedJids, !backlog);
@@ -5937,6 +5965,16 @@ async function handlePermissionReactions(
     const isApprove = ["👍", "✅", "👌", "🆗"].includes(emoji);
     const isDeny = ["👎", "❌", "🚫", "✋"].includes(emoji);
     if (!isApprove && !isDeny) continue;
+    // Our own reaction, echoed back (Baileys emits own events). When the
+    // owner IS the linked account its key is fromMe from the very chat we
+    // asked, so without this the agent could approve its own request by
+    // reacting to it. trackSent runs before the echo is processed.
+    if (wasSentByServer(reaction.key?.id)) {
+      logDiag(
+        `${LOG_PREFIX}: ignored permission reaction sent by this server\n`,
+      );
+      continue;
+    }
     const reactorJid =
       reaction.key?.participant ?? reaction.key?.remoteJid ?? "";
     // Same normalizing comparison claimPermission uses, for the same

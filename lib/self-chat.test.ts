@@ -92,7 +92,7 @@ describe("selfCommandRoute", () => {
       id: "3EB0SELF",
       chatJid: OWN_LID,
       ownForms: OWN,
-      dmDisabled: () => false,
+      blocked: () => false,
       hasContent: () => true,
       alreadyLogged: () => false,
       claim: createSeenIds(),
@@ -118,8 +118,8 @@ describe("selfCommandRoute", () => {
       expect(route({ chatJid })).toBe("hand-reply");
   });
 
-  test("dmPolicy disabled binds the owner too", () => {
-    expect(route({ dmDisabled: () => true })).toBe("hand-reply");
+  test("the caller's access rules (dmPolicy disabled, owner not allowlisted) bind the owner too", () => {
+    expect(route({ blocked: () => true })).toBe("hand-reply");
   });
 
   test("reactions and protocol messages (no content) stay off the inbound route", () => {
@@ -148,7 +148,7 @@ describe("selfCommandRoute", () => {
   test("I/O is not touched for a message an earlier check settled", () => {
     const touched: string[] = [];
     const spy = {
-      dmDisabled: () => (touched.push("access"), false),
+      blocked: () => (touched.push("access"), false),
       hasContent: () => (touched.push("content"), true),
       alreadyLogged: () => (touched.push("log"), false),
       claim: () => (touched.push("claim"), true),

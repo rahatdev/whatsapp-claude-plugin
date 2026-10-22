@@ -57,7 +57,8 @@ export type SelfCommandRoute = "hand-reply" | "deliver" | "duplicate";
  *
  *  - "hand-reply": the existing path (logOwnerHandReply). Everything that is
  *    not a self-command: the feature off, any chat but the note-to-self,
- *    dmPolicy "disabled" (the DM kill switch binds the owner too), and
+ *    `blocked` (the caller's access rules - dmPolicy "disabled", the
+ *    owner's number not allowlisted - which bind the owner too), and
  *    content-less messages - reactions and the protocol messages the owner's
  *    own devices exchange in that chat - which that path ignores.
  *  - "duplicate": a self-command id already taken. Dropped, never handed to
@@ -73,7 +74,7 @@ export function selfCommandRoute(
     id: string | null | undefined;
     chatJid: string;
     ownForms: readonly (string | null | undefined)[];
-    dmDisabled: () => boolean;
+    blocked: () => boolean;
     hasContent: () => boolean;
     alreadyLogged: (id: string) => boolean;
     claim: (id: string) => boolean;
@@ -84,7 +85,7 @@ export function selfCommandRoute(
   if (!input.enabled || !id) return "hand-reply";
   if (!isOwnSelfChat(input.chatJid, input.ownForms, jidNormalizedUser))
     return "hand-reply";
-  if (input.dmDisabled() || !input.hasContent()) return "hand-reply";
+  if (input.blocked() || !input.hasContent()) return "hand-reply";
   if (input.alreadyLogged(id)) return "duplicate";
   return input.claim(id) ? "deliver" : "duplicate";
 }
