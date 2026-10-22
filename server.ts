@@ -107,6 +107,12 @@ import {
 import { logContainsId } from "./lib/message-log-probe";
 import { ownerStamp, parsePermissionReply } from "./lib/owner";
 import {
+  createSeenIds,
+  selfCommandRoute,
+  selfCommandsEnabled,
+  type SelfCommandRoute,
+} from "./lib/self-chat";
+import {
   type AgedOut,
   agedOutKey,
   agedOutLine,
@@ -272,6 +278,11 @@ const ATTACH_DIRS =
 // once it has been delivered to Claude. Linked device only; the rules for
 // which message and which key are in lib/read-receipts.ts.
 const READ_RECEIPTS = readReceiptsEnabled(process.env.WHATSAPP_READ_RECEIPTS);
+// Default off: WHATSAPP_SELF_COMMANDS=1 delivers what the owner sends in their
+// own note-to-self chat as inbound messages (meta self_command="true"), so
+// that chat works as a command channel. Every other chat's fromMe messages
+// stay hand replies. Rules in lib/self-chat.ts; routing in handleMessage.
+const SELF_COMMANDS = selfCommandsEnabled(process.env.WHATSAPP_SELF_COMMANDS);
 // How long any stored log line lives (why one horizon, and why it is capped:
 // resolveTtlMs in lib/message-view.ts). Read here, not in the lib, so the lib
 // stays pure. TTL_NOTE is logged at startup rather than here - logDiag's own
@@ -3095,6 +3106,12 @@ const mcp = new Server(
         : []),
       'Messages from WhatsApp arrive as <channel source="whatsapp" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       "",
+      ...(SELF_COMMANDS
+        ? [
+            'A message whose tag has self_command="true" was written by the account owner in their own note-to-self chat: it is the owner talking to you directly, not a contact. Reply with the reply tool and that chat_id as usual - your reply lands in their note-to-self.',
+            "",
+          ]
+        : []),
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions. WhatsApp supports any emoji for reactions (no whitelist restriction).',
       "",
       "On session start, call the status tool immediately to check connection state and show the pairing code if the device is not yet paired. Then call the catch_up tool with NO arguments: it returns how many messages are waiting per chat (with an @ where a mention-gated group addressed you) and the open tasks from tasks.md - counts only, no message text and no chat_id. To read or answer one of them, call catch_up again with `chat` set to that name; that view carries the chat_id, which is what reply needs. Do NOT call unreplied to open a session - it returns the full text of everything outstanding, which is what counts-only exists to avoid; it is there for when you actually want that dump. Resume any open tasks.",
@@ -5256,6 +5273,34 @@ async function handlePollVote(
   if (TYPING_LOOP_MS > 0) typing.start(chatJid);
 }
 
+// Self-commands (WHATSAPP_SELF_COMMANDS): which route a fromMe message takes
+// - the rules are selfCommandRoute's, in lib/self-chat.ts. The note-to-self
+// arrives under the account's phone jid or its @lid, so both are passed.
+// seenSelfCommand is the in-memory half of "delivered once per id": it covers
+// a second copy landing while the first is still being downloaded or
+// transcribed, before messageAlreadyLogged can see it.
+const seenSelfCommand = createSeenIds();
+function routeFromMe(msg: WAMessage): SelfCommandRoute {
+  const lid =
+    sock && !(sock instanceof CloudApiSocket) ? sock.user?.lid : undefined;
+  return selfCommandRoute(
+    {
+      enabled: SELF_COMMANDS,
+      id: msg.key.id,
+      chatJid: msg.key.remoteJid ?? "",
+      ownForms: [ownJid, lid],
+      dmDisabled: () => loadAccess().dmPolicy === "disabled",
+      hasContent: () => {
+        const content = normalizeMessageContent(msg.message) ?? msg.message;
+        return !!(extractText(content) || classifyMedia(content));
+      },
+      alreadyLogged: messageAlreadyLogged,
+      claim: seenSelfCommand,
+    },
+    jidNormalizedUser,
+  );
+}
+
 async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   if (!msg.message) return;
   if (!msg.key.remoteJid) return;
@@ -5265,6 +5310,9 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   // was dropped as empty, after the ack reaction had already gone out.
   const pollUpdate = normalizeMessageContent(msg.message)?.pollUpdateMessage;
   if (pollUpdate) return handlePollVote(msg, pollUpdate, backlog);
+  // The owner's own message in their note-to-self, with WHATSAPP_SELF_COMMANDS
+  // on: it takes the inbound route below, minus gate() (see routeFromMe).
+  let selfCommand = false;
   // fromMe: our own echo, or the owner typing on their phone.
   if (msg.key.fromMe) {
     if (wasSentByServer(msg.key.id)) return;
@@ -5284,9 +5332,11 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
       )
     )
       return;
-    return logOwnerHandReply(msg);
-  }
-  if (wasSentByServer(msg.key.id)) return;
+    const route = routeFromMe(msg);
+    if (route === "hand-reply") return logOwnerHandReply(msg);
+    if (route === "duplicate") return;
+    selfCommand = true;
+  } else if (wasSentByServer(msg.key.id)) return;
 
   const remoteJid = msg.key.remoteJid;
   // Status updates / channel broadcasts aren't DMs or groups — treating them
@@ -5299,9 +5349,13 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   )
     return;
   const isGroup = remoteJid.endsWith("@g.us");
-  const senderJid = isGroup
-    ? jidNormalizedUser(msg.key.participant ?? remoteJid)
-    : jidNormalizedUser(remoteJid);
+  // A self-command's chat is often the owner's @lid; their phone jid is the
+  // one address every other line about the owner already uses.
+  const senderJid = selfCommand
+    ? ownJid || jidNormalizedUser(remoteJid)
+    : isGroup
+      ? jidNormalizedUser(msg.key.participant ?? remoteJid)
+      : jidNormalizedUser(remoteJid);
   const messageId = msg.key.id ?? "";
   const timestamp =
     typeof msg.messageTimestamp === "number"
@@ -5323,8 +5377,13 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   // because our passive lid-mapping.update listener missed it.
   await ensureLidResolved(senderJid);
 
-  // Gate check
-  const result = gate(remoteJid, senderJid, text, mentionedJids, !backlog);
+  // Gate check. Not for a self-command: the owner is the linked account
+  // itself, and gate() is the INBOUND path that mints pairing codes - the
+  // same reason logOwnerHandReply never calls it. routeFromMe already
+  // applied the one gate rule that still binds the owner (dmPolicy disabled).
+  const result: GateResult = selfCommand
+    ? { action: "deliver", access: loadAccess() }
+    : gate(remoteJid, senderJid, text, mentionedJids, !backlog);
 
   if (result.action === "drop") {
     // resolveToPhone returns its INPUT when the lid is unmapped, so echoing it
@@ -5566,7 +5625,9 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   }
 
   // Extract sender display info
-  const senderName = displaySenderName(msg.pushName, senderJid);
+  const senderName = selfCommand
+    ? ownerDisplayName()
+    : displaySenderName(msg.pushName, senderJid);
   const senderPhone = senderJid.split("@")[0];
 
   // Determine content text. Neutralized once, here, so the notification, the
@@ -5644,6 +5705,7 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
       // Also sender-supplied (contextInfo), so also envelope-safe.
       ...(replyToId ? { reply_to_id: safeName(replyToId) } : {}),
       ...(replyToSender ? { reply_to_sender: safeName(replyToSender) } : {}),
+      ...(selfCommand ? { self_command: "true" } : {}),
     },
   };
   // Blue ticks only once Claude has it: after the gate let it through and
