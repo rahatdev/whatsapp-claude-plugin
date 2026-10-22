@@ -89,9 +89,10 @@ WhatsApp (phone) ←─ Baileys ─→ MCP Server (server.ts) ←─ stdio ─�
   `:configure`, `:access`.
 - **`hooks/hooks.json`** → `hooks-handlers/session-start.sh` — onboarding detection at
   session start.
-- **`scripts/watchdog.sh`, `scripts/whisper-transcribe.sh`** — reference scripts users
-  copy out of the repo (watchdog to `~/.whatsapp-channel/watchdog.sh`; the whisper
-  script to `~/whisper-transcribe.sh` — server.ts hardcodes that home-dir path).
+- **`scripts/watchdog.sh`, `scripts/whisper-transcribe.sh`,
+  `scripts/whisper-cpp-transcribe.sh`** — reference scripts users copy out of the repo
+  (watchdog to `~/.whatsapp-channel/watchdog.sh`; either whisper script, mlx-whisper or
+  whisper.cpp, to `~/whisper-transcribe.sh` — server.ts hardcodes that home-dir path).
   Editing them in the repo does NOT affect running deployments until re-copied.
 
 ## Hard Rules (each one exists because it was violated before — evidence in docs/governance/A-diagnosis.md)

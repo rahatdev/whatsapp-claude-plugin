@@ -61,6 +61,7 @@ if (!isStaticMode()) {
       notes: [
         "Linked device: WHATSAPP_SELF_COMMANDS=1 sends your own note-to-self messages to Claude.",
         "That covers text, transcribed voice notes, photos and documents (default off).",
+        "New scripts/whisper-cpp-transcribe.sh: local voice transcription via whisper.cpp, no Python venv.",
       ],
     },
     {
