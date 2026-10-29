@@ -88,6 +88,9 @@ type GroupPolicy = {
   // false = a no-mention message stores nothing (server.ts is the reader).
   // Absent = kept for catch_up context, the 0.22.0 default.
   context?: boolean;
+  // true = owner-only command group (WHATSAPP_SELF_COMMANDS): the owner's
+  // own messages here are commands, everyone else's are dropped. Absent = off.
+  selfCommands?: boolean;
 };
 type PendingEntry = { senderId: string; chatId: string; expiresAt: number };
 type Access = {
@@ -186,7 +189,7 @@ const USAGE = `Usage: bun scripts/access.ts <command>
   forget <jid>                    purge a cached name/activity entry, even
                                    for a JID never allowlisted (see remove)
   policy <${POLICIES.join("|")}>   set the DM policy
-  group add <groupJid> [--mention|--no-mention] [--allow a,b] [--roster|--no-roster] [--context|--no-context]
+  group add <groupJid> [--mention|--no-mention] [--allow a,b] [--roster|--no-roster] [--context|--no-context] [--self-commands|--no-self-commands]
   group rm <groupJid>             stop responding in a group (files kept)
   review                          open the access screen in a NEW terminal
                                    window, wait for it, then print what
@@ -330,7 +333,7 @@ function status(): void {
   for (const [jid, g] of groups) {
     const name = meta[jid]?.name;
     lines.push(
-      `  - ${name ? `${name}  ` : ""}${jid}  mention=${g.requireMention}  roster=${!!g.roster}${g.context === false ? "  context=false" : ""}`,
+      `  - ${name ? `${name}  ` : ""}${jid}  mention=${g.requireMention}  roster=${!!g.roster}${g.context === false ? "  context=false" : ""}${g.selfCommands === true ? "  self-commands=true" : ""}`,
     );
   }
   process.stdout.write(lines.join("\n") + "\n");
@@ -407,6 +410,8 @@ function group(args: string[]): void {
         "no-roster": { type: "boolean" },
         context: { type: "boolean" },
         "no-context": { type: "boolean" },
+        "self-commands": { type: "boolean" },
+        "no-self-commands": { type: "boolean" },
         backup: { type: "boolean" },
       },
       allowPositionals: true,
@@ -423,6 +428,8 @@ function group(args: string[]): void {
     "no-roster": noRoster = false,
     context: contextOn = false,
     "no-context": noContext = false,
+    "self-commands": selfCommandsOn = false,
+    "no-self-commands": noSelfCommands = false,
     backup,
   } = parsed.values;
   const jid = requireArg(jidArg, "group JID");
@@ -433,6 +440,8 @@ function group(args: string[]): void {
   if (roster && noRoster) die("Cannot pass both --roster and --no-roster.");
   if (contextOn && noContext)
     die("Cannot pass both --context and --no-context.");
+  if (selfCommandsOn && noSelfCommands)
+    die("Cannot pass both --self-commands and --no-self-commands.");
   const a = load();
   if (sub === "rm") {
     if (!a.groups[jid]) {
@@ -478,11 +487,22 @@ function group(args: string[]): void {
   // policy that never mentioned context stays byte-identical.
   const contextVal = contextOn ? true : noContext ? false : existing?.context;
   if (contextVal !== undefined) a.groups[jid].context = contextVal;
+  // Absent means off, and like context the key is only written once set, so
+  // a policy that never used it stays byte-identical. Carried over, never
+  // dropped: this object is rebuilt above, and losing the flag would hand
+  // the owner's command channel to every member of the group.
+  const selfCommandsVal = selfCommandsOn
+    ? true
+    : noSelfCommands
+      ? false
+      : existing?.selfCommands;
+  if (selfCommandsVal !== undefined)
+    a.groups[jid].selfCommands = selfCommandsVal;
   save(a, { backup });
 
   const config = provisionGroupFiles(jid);
   process.stdout.write(
-    `${existing ? "Updated" : "Added"} ${jid} (mention required: ${a.groups[jid].requireMention}, roster: ${a.groups[jid].roster}, context kept: ${a.groups[jid].context !== false}).\nEdit its personality at ${config}\n`,
+    `${existing ? "Updated" : "Added"} ${jid} (mention required: ${a.groups[jid].requireMention}, roster: ${a.groups[jid].roster}, context kept: ${a.groups[jid].context !== false}${a.groups[jid].selfCommands === true ? ", owner-only command group: true" : ""}).\nEdit its personality at ${config}\n`,
   );
 }
 

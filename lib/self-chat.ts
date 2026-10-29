@@ -1,10 +1,14 @@
-// Self-commands: the owner's own note-to-self chat as a command channel.
+// Self-commands: the owner's own note-to-self chat, and any group they mark
+// as a command group, as a command channel.
 //
 // Off by default. With WHATSAPP_SELF_COMMANDS=1, a message the owner sends
-// into their OWN note-to-self chat is delivered to the agent as an ordinary
-// inbound message (meta self_command="true") instead of being logged as a
-// hand reply. Every other fromMe message - the owner writing to a contact or
-// a group from their phone - stays a hand reply, exactly as before.
+// into their OWN note-to-self chat, or into a group whose access.json entry
+// has `selfCommands: true`, is delivered to the agent as an ordinary inbound
+// message (meta self_command="true") instead of being logged as a hand
+// reply. Every other fromMe message - the owner writing to a contact or to
+// any other group from their phone - stays a hand reply, exactly as before.
+// What the OTHER members of a command group send is never delivered at all;
+// that half is gate()'s, in server.ts.
 //
 // Pure, and typed against a passed-in jidNormalizedUser, so it is unit
 // testable without server.ts's connect-on-import side effects (same reason
@@ -56,9 +60,11 @@ export type SelfCommandRoute = "hand-reply" | "deliver" | "duplicate";
  *  the caller first, in that order).
  *
  *  - "hand-reply": the existing path (logOwnerHandReply). Everything that is
- *    not a self-command: the feature off, any chat but the note-to-self,
- *    `blocked` (the caller's access rules - dmPolicy "disabled", the
- *    owner's number not allowlisted - which bind the owner too), and
+ *    not a self-command: the feature off, any chat but the note-to-self or a
+ *    command group (`commandGroup`, asked only for a group jid), `blocked`
+ *    (the caller's access rules - dmPolicy "disabled", and for the
+ *    note-to-self the owner's number not allowlisted - which bind the owner
+ *    too), and
  *    content-less messages - reactions and the protocol messages the owner's
  *    own devices exchange in that chat - which that path ignores.
  *  - "duplicate": a self-command id already taken. Dropped, never handed to
@@ -74,6 +80,7 @@ export function selfCommandRoute(
     id: string | null | undefined;
     chatJid: string;
     ownForms: readonly (string | null | undefined)[];
+    commandGroup: (groupJid: string) => boolean;
     blocked: () => boolean;
     hasContent: () => boolean;
     alreadyLogged: (id: string) => boolean;
@@ -83,8 +90,10 @@ export function selfCommandRoute(
 ): SelfCommandRoute {
   const { id } = input;
   if (!input.enabled || !id) return "hand-reply";
-  if (!isOwnSelfChat(input.chatJid, input.ownForms, jidNormalizedUser))
-    return "hand-reply";
+  const commandChat = input.chatJid.endsWith("@g.us")
+    ? input.commandGroup(input.chatJid)
+    : isOwnSelfChat(input.chatJid, input.ownForms, jidNormalizedUser);
+  if (!commandChat) return "hand-reply";
   if (input.blocked() || !input.hasContent()) return "hand-reply";
   if (input.alreadyLogged(id)) return "duplicate";
   return input.claim(id) ? "deliver" : "duplicate";

@@ -606,6 +606,35 @@ describe("groups", () => {
     expect(access(dir).groups["1@g.us"].context).toBe(true);
   });
 
+  test("--self-commands marks an owner-only command group; omitting it writes no key", () => {
+    const dir = freshStateDir();
+    run(dir, "group", "add", "1@g.us", "--self-commands");
+    expect(access(dir).groups["1@g.us"].selfCommands).toBe(true);
+    run(dir, "group", "add", "2@g.us");
+    expect("selfCommands" in access(dir).groups["2@g.us"]).toBe(false);
+    // The entry is rebuilt on every add: dropping the flag here would open
+    // the owner's command channel to every member of the group.
+    run(dir, "group", "add", "1@g.us", "--mention", "--roster");
+    expect(access(dir).groups["1@g.us"].selfCommands).toBe(true);
+    expect(run(dir, "status").out).toContain("self-commands=true");
+    run(dir, "group", "add", "1@g.us", "--no-self-commands");
+    expect(access(dir).groups["1@g.us"].selfCommands).toBe(false);
+  });
+
+  test("passing both --self-commands and --no-self-commands together is refused", () => {
+    const dir = freshStateDir();
+    const res = run(
+      dir,
+      "group",
+      "add",
+      "1@g.us",
+      "--self-commands",
+      "--no-self-commands",
+    );
+    expect(res.code).toBe(1);
+    expect(existsSync(join(dir, "access.json"))).toBe(false);
+  });
+
   test("passing both --context and --no-context together is refused", () => {
     const dir = freshStateDir();
     const res = run(dir, "group", "add", "1@g.us", "--context", "--no-context");

@@ -15,6 +15,7 @@ const OWN = [OWN_PN, OWN_LID];
 const CONTACT = "15550002222@s.whatsapp.net";
 const CONTACT_LID = "99887766554433@lid";
 const GROUP = "120363000000000000@g.us";
+const COMMAND_GROUP = "120363433293466581@g.us";
 
 describe("selfCommandsEnabled", () => {
   test("only an explicit 1 turns it on", () => {
@@ -92,6 +93,7 @@ describe("selfCommandRoute", () => {
       id: "3EB0SELF",
       chatJid: OWN_LID,
       ownForms: OWN,
+      commandGroup: (jid: string) => jid === COMMAND_GROUP,
       blocked: () => false,
       hasContent: () => true,
       alreadyLogged: () => false,
@@ -107,8 +109,15 @@ describe("selfCommandRoute", () => {
     expect(route({ chatJid: OWN_PN })).toBe("deliver");
   });
 
+  test("the owner's message in a command group is delivered", () => {
+    expect(route({ chatJid: COMMAND_GROUP })).toBe("deliver");
+  });
+
   test("off by default: everything stays a hand reply", () => {
     expect(route({ enabled: false })).toBe("hand-reply");
+    expect(route({ enabled: false, chatJid: COMMAND_GROUP })).toBe(
+      "hand-reply",
+    );
   });
 
   // The guarantee the feature rests on: the owner writing to anyone else
@@ -118,8 +127,23 @@ describe("selfCommandRoute", () => {
       expect(route({ chatJid })).toBe("hand-reply");
   });
 
+  // commandGroup is the group half of "which chats are command chats": it is
+  // never asked about a DM, so a contact cannot become one through it, and
+  // the note-to-self needs no group entry.
+  test("commandGroup is asked only about groups", () => {
+    const asked: string[] = [];
+    const commandGroup = (jid: string) => (asked.push(jid), true);
+    expect(route({ commandGroup, chatJid: CONTACT })).toBe("hand-reply");
+    expect(route({ commandGroup, chatJid: OWN_LID })).toBe("deliver");
+    expect(route({ commandGroup, chatJid: GROUP })).toBe("deliver");
+    expect(asked).toEqual([GROUP]);
+  });
+
   test("the caller's access rules (dmPolicy disabled, owner not allowlisted) bind the owner too", () => {
     expect(route({ blocked: () => true })).toBe("hand-reply");
+    expect(route({ blocked: () => true, chatJid: COMMAND_GROUP })).toBe(
+      "hand-reply",
+    );
   });
 
   test("reactions and protocol messages (no content) stay off the inbound route", () => {
@@ -133,6 +157,9 @@ describe("selfCommandRoute", () => {
 
   test("a replay of a logged id is a duplicate, never a hand reply", () => {
     expect(route({ alreadyLogged: () => true })).toBe("duplicate");
+    expect(route({ alreadyLogged: () => true, chatJid: COMMAND_GROUP })).toBe(
+      "duplicate",
+    );
   });
 
   // Multi-device / backlog: the second copy can land while the first is
@@ -148,6 +175,7 @@ describe("selfCommandRoute", () => {
   test("I/O is not touched for a message an earlier check settled", () => {
     const touched: string[] = [];
     const spy = {
+      commandGroup: () => (touched.push("group"), true),
       blocked: () => (touched.push("access"), false),
       hasContent: () => (touched.push("content"), true),
       alreadyLogged: () => (touched.push("log"), false),
@@ -155,6 +183,7 @@ describe("selfCommandRoute", () => {
     };
     route({ ...spy, chatJid: CONTACT });
     route({ ...spy, enabled: false });
+    route({ ...spy, enabled: false, chatJid: COMMAND_GROUP });
     expect(touched).toEqual([]);
   });
 });
