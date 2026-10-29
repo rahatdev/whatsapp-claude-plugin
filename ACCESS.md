@@ -203,6 +203,33 @@ Configure outbound behavior with `/whatsapp-channel:access set <key> <value>`.
 
 **Off by default.** Set `WHATSAPP_READ_RECEIPTS=1` (in the environment or `~/.whatsapp-channel/.env`) to mark each message read, turning the sender's ticks blue, as soon as it is delivered to Claude. Only messages that pass the access gate are marked: a dropped sender, a pairing request, an unaddressed message in a mention-gated group and the backlog replayed after a reconnect are left unread. In a group the receipt names the sender, as the phone does. If read receipts are off in your phone's privacy settings, the chat is marked read on your own devices only and senders see no blue ticks. The `mark_read` tool marks one message read by hand. Linked device only: Cloud API sends no read receipts and has no `mark_read`.
 
+### Self-commands (note-to-self)
+
+**Off by default.**
+Set `WHATSAPP_SELF_COMMANDS=1` (in the environment or `~/.whatsapp-channel/.env`) to use your own note-to-self chat as a command channel.
+Linked device only.
+What you send there yourself (text, voice notes, photos, documents) is then delivered to Claude as an ordinary inbound message, with `self_command="true"` on the `<channel>` tag; a voice note arrives transcribed as `[Voice message] <transcript>` like any other.
+Without it, your own messages are only logged, as replies you typed by hand.
+
+It applies to that one chat, under either of its addresses (your phone number or your `@lid`), and to any group you mark as a command group (below).
+What you type to anyone else from your phone stays a hand reply, never a command.
+Claude's own replies into the chat are never delivered back to it, a permission answer (`yes <id>` or a reaction) is still taken as the answer and not delivered, each message is delivered once even if WhatsApp sends it again, and messages you sent while no server was connected are logged for `catch_up` rather than pushed live.
+`dmPolicy: disabled` turns it off along with every other DM.
+
+#### Command groups
+
+A group can be a command channel too, for example one you create with only yourself in it.
+Mark it with `/whatsapp-channel:access group add <groupJid> --self-commands` (`--no-self-commands` turns it back off).
+Your own messages in that group are then delivered as self-commands, with the group's `chat_id`, and Claude's replies land in the group.
+`requireMention` does not apply to them: everything you write there is meant for Claude.
+
+A command group is owner-only, whether or not `WHATSAPP_SELF_COMMANDS` is on.
+A message anyone else sends in it is dropped before `allowFrom` or the mention check, and is stored nowhere, not even as `catch_up` context.
+Their poll votes are dropped the same way.
+So adding someone to the group never lets them talk to Claude through it.
+
+Like any inbound message, these go to every Claude Code session attached to the channel, so decide which session acts on them (for example, by telling the others to ignore `self_command` messages).
+
 ### Proactive notifications
 
 **On by default.** Claude is told to surface things to you the moment they happen, rather than waiting for its next natural reply: an inbound message arriving, this terminal's role _changing_ (becoming primary/secondary, or losing/regaining the primary connection — see multi-terminal sync below; the initial role a terminal starts in isn't a change and never announces), a pairing code, and the "paired and connected" confirmation. Set `WHATSAPP_QUIET=1` to turn all of that off for one terminal — a pairing code you need is always in the diagnostics log regardless, so nothing is lost. It's an env var, not a saved setting, so it only applies to sessions started with it set — nothing persists it past the terminal that set it.

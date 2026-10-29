@@ -107,6 +107,12 @@ import {
 import { logContainsId } from "./lib/message-log-probe";
 import { ownerStamp, parsePermissionReply } from "./lib/owner";
 import {
+  createSeenIds,
+  selfCommandRoute,
+  selfCommandsEnabled,
+  type SelfCommandRoute,
+} from "./lib/self-chat";
+import {
   type AgedOut,
   agedOutKey,
   agedOutLine,
@@ -272,6 +278,11 @@ const ATTACH_DIRS =
 // once it has been delivered to Claude. Linked device only; the rules for
 // which message and which key are in lib/read-receipts.ts.
 const READ_RECEIPTS = readReceiptsEnabled(process.env.WHATSAPP_READ_RECEIPTS);
+// Default off: WHATSAPP_SELF_COMMANDS=1 delivers what the owner sends in their
+// own note-to-self chat as inbound messages (meta self_command="true"), so
+// that chat works as a command channel. Every other chat's fromMe messages
+// stay hand replies. Rules in lib/self-chat.ts; routing in handleMessage.
+const SELF_COMMANDS = selfCommandsEnabled(process.env.WHATSAPP_SELF_COMMANDS);
 // How long any stored log line lives (why one horizon, and why it is capped:
 // resolveTtlMs in lib/message-view.ts). Read here, not in the lib, so the lib
 // stays pure. TTL_NOTE is logged at startup rather than here - logDiag's own
@@ -1220,6 +1231,12 @@ type GroupPolicy = {
   // (routed: false), the 0.22.0 default. Read as `!== false` everywhere so
   // a policy written before this field existed keeps context.
   context?: boolean;
+  // true = an owner-only command group. With WHATSAPP_SELF_COMMANDS=1 the
+  // owner's own messages here reach the agent as self-commands (routeFromMe),
+  // and every OTHER member's message is dropped by gate() and stored nowhere,
+  // whatever allowFrom says - nobody else can talk to the agent through the
+  // owner's command channel. Read as `=== true`: absent is an ordinary group.
+  selfCommands?: boolean;
 };
 
 type Access = {
@@ -2033,6 +2050,11 @@ function gate(
   // Group
   const policy = access.groups[remoteJid];
   if (!policy) return { action: "drop" };
+  // A command group is the owner's alone. Their own messages never reach
+  // gate() (they are fromMe, routed by routeFromMe), so every message that
+  // does is someone else's: dropped before allowFrom or the mention check,
+  // and with no keepContext, so not even catch_up shows it.
+  if (policy.selfCommands === true) return { action: "drop" };
   const groupAllowFrom = policy.allowFrom ?? [];
   if (groupAllowFrom.length > 0 && !isAllowedJid(senderJid, groupAllowFrom)) {
     return { action: "drop" };
@@ -3095,6 +3117,12 @@ const mcp = new Server(
         : []),
       'Messages from WhatsApp arrive as <channel source="whatsapp" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       "",
+      ...(SELF_COMMANDS
+        ? [
+            'A message whose tag has self_command="true" was written by the account owner in their own note-to-self chat or in a group they made their command group: it is the owner talking to you directly, not a contact. Reply with the reply tool and that chat_id as usual - your reply lands in the chat the command came from.',
+            "",
+          ]
+        : []),
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions. WhatsApp supports any emoji for reactions (no whitelist restriction).',
       "",
       "On session start, call the status tool immediately to check connection state and show the pairing code if the device is not yet paired. Then call the catch_up tool with NO arguments: it returns how many messages are waiting per chat (with an @ where a mention-gated group addressed you) and the open tasks from tasks.md - counts only, no message text and no chat_id. To read or answer one of them, call catch_up again with `chat` set to that name; that view carries the chat_id, which is what reply needs. Do NOT call unreplied to open a session - it returns the full text of everything outstanding, which is what counts-only exists to avoid; it is there for when you actually want that dump. Resume any open tasks.",
@@ -4134,6 +4162,14 @@ const handleToolCall = async (
       case "react": {
         assertAllowedChat(args.chat_id as string);
         if (!sock) throw new Error("WhatsApp not connected");
+        // A reaction on a permission request IS an answer to it, and only
+        // the human may give one. Refused here as well as ignored on arrival
+        // (handlePermissionReactions): the id is not secret - a quote-reply
+        // to the request hands it to the agent as reply_to_id.
+        if (permissionMessageMap.has(args.message_id as string))
+          throw new Error(
+            "refusing to react to a permission request - only the user can answer it",
+          );
         const key = lookupKey(
           args.chat_id as string,
           args.message_id as string,
@@ -4283,7 +4319,7 @@ const handleToolCall = async (
               const hasConfig = existsSync(groupConfigPath(gid));
               const hasMemory = existsSync(groupMemoryPath(gid));
               lines.push(
-                `  ${gid}: mention=${policy.requireMention ?? false}, config=${hasConfig}, memory=${hasMemory}`,
+                `  ${gid}: mention=${policy.requireMention ?? false}, config=${hasConfig}, memory=${hasMemory}${policy.selfCommands === true ? ", self-commands=true" : ""}`,
               );
             }
           }
@@ -4523,14 +4559,15 @@ const handleToolCall = async (
         const lines = groups.map((g) => {
           const allowed = Object.hasOwn(access.groups, g.id);
           const roster = !!access.groups[g.id]?.roster;
+          const commands = access.groups[g.id]?.selfCommands === true;
           // Same reason as resolveGroupName: an admin-settable subject is
           // rendered into text the model reads.
           const name = safeName(g.subject)?.trim() || "(no name)";
-          const flags = `${allowed ? "✓" : "+"}${roster ? "R" : ""}`;
+          const flags = `${allowed ? "✓" : "+"}${roster ? "R" : ""}${commands ? "C" : ""}`;
           return `${flags} ${name}\n    ${g.id}${allowed ? "" : "  (NOT allowlisted)"}`;
         });
         const legend =
-          "✓ = allowlisted   + = joined but not allowlisted   R = roster access granted (add/change via /whatsapp-channel:access)";
+          "✓ = allowlisted   + = joined but not allowlisted   R = roster access granted   C = owner-only command group (add/change via /whatsapp-channel:access)";
         return {
           content: [
             {
@@ -5256,6 +5293,51 @@ async function handlePollVote(
   if (TYPING_LOOP_MS > 0) typing.start(chatJid);
 }
 
+// Self-commands (WHATSAPP_SELF_COMMANDS): which route a fromMe message takes
+// - the rules are selfCommandRoute's, in lib/self-chat.ts. The note-to-self
+// arrives under the account's phone jid or its @lid, so both are passed; a
+// group is a command chat when its access.json entry has selfCommands: true.
+// seenSelfCommand is the in-memory half of "delivered once per id": it covers
+// a second copy landing while the first is still being downloaded or
+// transcribed, before messageAlreadyLogged can see it.
+const seenSelfCommand = createSeenIds();
+function routeFromMe(msg: WAMessage): SelfCommandRoute {
+  const lid =
+    sock && !(sock instanceof CloudApiSocket) ? sock.user?.lid : undefined;
+  return selfCommandRoute(
+    {
+      enabled: SELF_COMMANDS,
+      id: msg.key.id,
+      chatJid: msg.key.remoteJid ?? "",
+      ownForms: [ownJid, lid],
+      // ownJid too: it is the sender a group self-command is delivered under,
+      // and before the first `open` it is "".
+      commandGroup: (groupJid) =>
+        !!ownJid && loadAccess().groups[groupJid]?.selfCommands === true,
+      // The rules logOwnerHandReply applies. dmPolicy "disabled" silences
+      // every chat (gate() drops groups too). For the note-to-self, the
+      // owner's own number must also be allowlisted, or every reply into the
+      // chat would be refused by assertAllowedChat and the command would sit
+      // unreplied (static mode never auto-adds it); a command group passes
+      // assertAllowedChat by being in access.groups, which commandGroup
+      // already required.
+      blocked: () => {
+        const access = loadAccess();
+        if (access.dmPolicy === "disabled") return true;
+        if (msg.key.remoteJid?.endsWith("@g.us")) return false;
+        return !isAllowedJid(ownJid, access.allowFrom);
+      },
+      hasContent: () => {
+        const content = normalizeMessageContent(msg.message) ?? msg.message;
+        return !!(extractText(content) || classifyMedia(content));
+      },
+      alreadyLogged: messageAlreadyLogged,
+      claim: seenSelfCommand,
+    },
+    jidNormalizedUser,
+  );
+}
+
 async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   if (!msg.message) return;
   if (!msg.key.remoteJid) return;
@@ -5265,6 +5347,10 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   // was dropped as empty, after the ack reaction had already gone out.
   const pollUpdate = normalizeMessageContent(msg.message)?.pollUpdateMessage;
   if (pollUpdate) return handlePollVote(msg, pollUpdate, backlog);
+  // The owner's own message in their note-to-self or a command group, with
+  // WHATSAPP_SELF_COMMANDS on: it takes the inbound route below, minus gate()
+  // (see routeFromMe).
+  let selfCommand = false;
   // fromMe: our own echo, or the owner typing on their phone.
   if (msg.key.fromMe) {
     if (wasSentByServer(msg.key.id)) return;
@@ -5282,13 +5368,30 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
         msg.key.remoteJid ?? "",
         extractText(msg.message),
       )
-    )
+    ) {
+      // Taken, so a replay of it (a reconnect's append batch can come back
+      // as live) is a duplicate, not a self-command: the claim fails the
+      // second time, and the answer would reach the agent as a message.
+      if (msg.key.id) seenSelfCommand(msg.key.id);
       return;
-    return logOwnerHandReply(msg);
-  }
-  if (wasSentByServer(msg.key.id)) return;
+    }
+    const route = routeFromMe(msg);
+    if (route === "hand-reply") return logOwnerHandReply(msg);
+    if (route === "duplicate") return;
+    selfCommand = true;
+  } else if (wasSentByServer(msg.key.id)) return;
 
-  const remoteJid = msg.key.remoteJid;
+  // A note-to-self command's chat is canonicalized to the owner's phone jid.
+  // The note-to-self arrives under either form (usually the @lid), and one
+  // chat under two chat_ids would split its unreplied count and catch_up
+  // history and leave "typing…" up after a reply under the other form. The
+  // phone jid is the form this server already sends into that chat
+  // (access.owner, the permission requests), so replies take a proven path.
+  // A command group has one jid and keeps it.
+  const remoteJid =
+    selfCommand && ownJid && !msg.key.remoteJid.endsWith("@g.us")
+      ? ownJid
+      : msg.key.remoteJid;
   // Status updates / channel broadcasts aren't DMs or groups — treating them
   // as a DM would burn a pairing slot and, in pairing mode, publish the
   // "pairing required" reply as your own public status update.
@@ -5299,9 +5402,13 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   )
     return;
   const isGroup = remoteJid.endsWith("@g.us");
-  const senderJid = isGroup
-    ? jidNormalizedUser(msg.key.participant ?? remoteJid)
-    : jidNormalizedUser(remoteJid);
+  // A self-command's sender is the owner, in a command group as in the
+  // note-to-self (where remoteJid is already the owner's jid, see above).
+  const senderJid = selfCommand
+    ? ownJid || remoteJid
+    : isGroup
+      ? jidNormalizedUser(msg.key.participant ?? remoteJid)
+      : jidNormalizedUser(remoteJid);
   const messageId = msg.key.id ?? "";
   const timestamp =
     typeof msg.messageTimestamp === "number"
@@ -5323,8 +5430,14 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   // because our passive lid-mapping.update listener missed it.
   await ensureLidResolved(senderJid);
 
-  // Gate check
-  const result = gate(remoteJid, senderJid, text, mentionedJids, !backlog);
+  // Gate check. Not for a self-command: the owner is the linked account
+  // itself, and gate() is the INBOUND path that mints pairing codes - the
+  // same reason logOwnerHandReply never calls it. routeFromMe already
+  // applied the gate rules that still bind the owner (dmPolicy disabled,
+  // their own number allowlisted).
+  const result: GateResult = selfCommand
+    ? { action: "deliver", access: loadAccess() }
+    : gate(remoteJid, senderJid, text, mentionedJids, !backlog);
 
   if (result.action === "drop") {
     // resolveToPhone returns its INPUT when the lid is unmapped, so echoing it
@@ -5566,7 +5679,9 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   }
 
   // Extract sender display info
-  const senderName = displaySenderName(msg.pushName, senderJid);
+  const senderName = selfCommand
+    ? ownerDisplayName()
+    : displaySenderName(msg.pushName, senderJid);
   const senderPhone = senderJid.split("@")[0];
 
   // Determine content text. Neutralized once, here, so the notification, the
@@ -5644,6 +5759,7 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
       // Also sender-supplied (contextInfo), so also envelope-safe.
       ...(replyToId ? { reply_to_id: safeName(replyToId) } : {}),
       ...(replyToSender ? { reply_to_sender: safeName(replyToSender) } : {}),
+      ...(selfCommand ? { self_command: "true" } : {}),
     },
   };
   // Blue ticks only once Claude has it: after the gate let it through and
@@ -5875,6 +5991,16 @@ async function handlePermissionReactions(
     const isApprove = ["👍", "✅", "👌", "🆗"].includes(emoji);
     const isDeny = ["👎", "❌", "🚫", "✋"].includes(emoji);
     if (!isApprove && !isDeny) continue;
+    // Our own reaction, echoed back (Baileys emits own events). When the
+    // owner IS the linked account its key is fromMe from the very chat we
+    // asked, so without this the agent could approve its own request by
+    // reacting to it. trackSent runs before the echo is processed.
+    if (wasSentByServer(reaction.key?.id)) {
+      logDiag(
+        `${LOG_PREFIX}: ignored permission reaction sent by this server\n`,
+      );
+      continue;
+    }
     const reactorJid =
       reaction.key?.participant ?? reaction.key?.remoteJid ?? "";
     // Same normalizing comparison claimPermission uses, for the same

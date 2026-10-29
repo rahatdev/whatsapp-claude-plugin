@@ -162,7 +162,7 @@ when there was really something cached to forget.
 1. Validate `<mode>` is one of `pairing`, `allowlist`, `disabled`.
 2. Read (create default if missing), set `dmPolicy`, write.
 
-### `group add <groupJid>` (optional: `--mention`/`--no-mention`, `--allow jid1,jid2`, `--roster`/`--no-roster`)
+### `group add <groupJid>` (optional: `--mention`/`--no-mention`, `--allow jid1,jid2`, `--roster`/`--no-roster`, `--self-commands`/`--no-self-commands`)
 
 1. Read access.json (create default if missing).
 2. **Merge into any existing `groups[<groupJid>]`, never overwrite it
@@ -178,7 +178,8 @@ when there was really something cached to forget.
    leave it unmentioned), the user has to say so - set that field to
    `false` directly rather than omitting it, since omitting always means
    "keep whatever it already was." `roster` — see "Roster access" below
-   before turning it on for a group.
+   before turning it on for a group. `selfCommands` — see "Command
+   groups" below; like `context`, the key is only written once set.
 3. Write access.json.
 4. `mkdir -p ~/.whatsapp-channel/groups/<groupJid>`
 5. **Run the interactive Soul setup wizard** — ask the user these
@@ -318,6 +319,15 @@ Running it twice puts things back as they were (the second undo undoes the
 first). `wizard --undo` is the same command, and is the one exception to the
 "never run `wizard`" rule above, because it opens no prompt and makes no
 decision.
+
+### Command groups (`--self-commands` / `selfCommands: true`)
+
+Makes the group an owner-only command channel. With
+`WHATSAPP_SELF_COMMANDS=1`, the owner's own messages in it (sent from
+their phone or any of their devices) reach Claude as self-commands
+(`self_command="true"`), mention or not. Every other member's message is
+dropped and stored nowhere, whatever `allowFrom` says, so only set it on
+a group the owner means to use for talking to Claude. Off by default.
 
 ### Roster access (`--roster` / `roster: true`)
 

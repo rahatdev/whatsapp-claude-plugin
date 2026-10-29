@@ -57,6 +57,15 @@ if (!isStaticMode()) {
   // latest.
   const CHANGELOG: { version: string; notes: string[] }[] = [
     {
+      version: "0.33.0",
+      notes: [
+        "Linked device: WHATSAPP_SELF_COMMANDS=1 sends your own note-to-self messages to Claude.",
+        "That covers text, transcribed voice notes, photos and documents (default off).",
+        "group add --self-commands makes a group your own command chat; others there are ignored.",
+        "New scripts/whisper-cpp-transcribe.sh: local voice transcription via whisper.cpp, no Python venv.",
+      ],
+    },
+    {
       version: "0.32.0",
       notes: [
         "Linked device: WHATSAPP_READ_RECEIPTS=1 marks messages read once Claude gets them (default off).",
