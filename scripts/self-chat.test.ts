@@ -74,7 +74,13 @@ function makeFakeSocket() {
       // is scheduled, as in Baileys.
       await new Promise((r) => setTimeout(r, 1));
       appendFileSync(SENT, JSON.stringify({ jid, id, content: "text" in content ? { text: content.text } : "react" in content ? { react: content.react.text } : { other: true } }) + "\\n");
-      process.nextTick(() => ev.emit("messages.upsert", { messages: [full], type: "append" }));
+      // "[early echo]" in the text: the echo is handled before sendMessage
+      // even returns, the extreme of the ordering above. Only an id recorded
+      // before the send can recognise it.
+      if ("text" in content && content.text.includes("[early echo]"))
+        ev.emit("messages.upsert", { messages: [full], type: "append" });
+      else
+        process.nextTick(() => ev.emit("messages.upsert", { messages: [full], type: "append" }));
       return full;
     },
     async sendPresenceUpdate() {},
@@ -386,6 +392,22 @@ describe("owner commands Claude from their own note-to-self chat", () => {
     expect(loggedLines().find((l) => l.id === "SELF-TEXT-1")?.replied).toBe(
       true,
     );
+  }, 20000);
+
+  test("an echo handled before the send even returns is still recognised as ours", async () => {
+    const before = channelNotes().length;
+    const result = await tool("reply", {
+      chat_id: OWN_LID,
+      text: "[early echo] done.",
+    });
+    expect(result.isError).toBeFalsy();
+    const echo = sends().find((s) => s.content.text === "[early echo] done.");
+    expect(echo).toBeTruthy();
+    await settle();
+    expect(channelNotes().length).toBe(before);
+    expect(
+      loggedLines().some((l) => l.id === echo.id && l.direction === "in"),
+    ).toBe(false);
   }, 20000);
 
   test("a permission reply typed in the self-chat is claimed, not delivered as chat", async () => {
