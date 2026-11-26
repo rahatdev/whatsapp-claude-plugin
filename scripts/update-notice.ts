@@ -57,6 +57,12 @@ if (!isStaticMode()) {
   // latest.
   const CHANGELOG: { version: string; notes: string[] }[] = [
     {
+      version: "0.32.1",
+      notes: [
+        'Linked device: what you send in "Message yourself" now reaches Claude, typed or as a voice note.',
+      ],
+    },
+    {
       version: "0.32.0",
       notes: [
         "Linked device: WHATSAPP_READ_RECEIPTS=1 marks messages read once Claude gets them (default off).",

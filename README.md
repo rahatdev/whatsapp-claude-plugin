@@ -141,6 +141,7 @@ transcription and context recovery also work with Cloud API.
 - **Full media support.** Photos, voice notes, video, documents, and stickers, in both directions.
 - **Polls.** `send_poll` asks a chat a question with up to 12 options; every vote comes back to the session as a message (linked device).
 - **Voice transcription.** Incoming voice notes are transcribed locally via mlx-whisper (see [setup](#voice-transcription-optional)); without the script they arrive as plain attachments.
+- **Note-to-self commands.** Linked on your own number, your "Message yourself" chat talks straight to Claude, typed or by voice note ([details](./USAGE.md#talking-to-claude-from-your-own-chat)).
 - **Access control.** Pairing codes, allowlists, and per-group policies gate every inbound message — strangers never reach your session. Managed via `/whatsapp-channel:access` in Claude Code, or `bun scripts/access.ts` anywhere.
 - **Per-group personalities.** Each group gets its own `config.md` with a custom personality and conversation memory.
 - **Permission relay.** Approve or deny Claude's tool requests from WhatsApp with an emoji reaction (👍 / 👎).

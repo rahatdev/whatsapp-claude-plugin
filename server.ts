@@ -23,6 +23,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   DisconnectReason,
   downloadMediaMessage,
+  generateMessageIDV2,
   getContentType,
   jidNormalizedUser,
   isLidUser,
@@ -2332,7 +2333,9 @@ let durableSentIds = (() => {
 })();
 
 function trackSent(key: WAMessageKey): void {
-  if (!key.id) return;
+  // Already recorded: sendTracked records a Baileys id before the send and
+  // again from the returned key, and sent.jsonl needs it once.
+  if (!key.id || durableSentIds.has(key.id)) return;
   const now = Date.now();
   durableSentIds.add(key.id);
   // Never throws into a send: a failure here degrades to today's behaviour
@@ -2346,17 +2349,37 @@ function trackSent(key: WAMessageKey): void {
   }
 }
 
-// Every send this server makes has to be tracked, not just the reply tool's:
+// Every send this server makes goes through here, not just the reply tool's:
 // handleMessage treats "fromMe and not sent by this server" as the owner
 // typing on their phone, and Baileys' event buffer delivers a batch under
 // its FIRST entry's type, so an own `append` sharing a window with an inbound
 // `notify` arrives as notify - untracked, it would be logged as a hand reply
-// under the owner's name and clear that chat's unreplied count.
+// under the owner's name and clear that chat's unreplied count. In the
+// owner's own self-chat it is worse: an untracked echo there is routed to
+// Claude as a command from the owner, and Claude answers its own message.
+//
+// THE ID IS RECORDED BEFORE THE SEND, not from the returned key. Baileys
+// queues the echo on process.nextTick once the relay is done
+// (Socket/messages-send.js), and under Bun that tick runs ahead of this
+// function's `await` continuation (Node runs it after). What keeps the echo
+// behind us today is Baileys' own mutex and event buffer, a microtask count
+// nothing here controls. Choosing the id first (Baileys honours
+// options.messageId, the same generator it would use) makes the echo
+// recognisable whatever the ordering. The returned key is tracked as well:
+// Cloud API ids come back from Graph, and Cloud has no echo to race.
 async function sendTracked(
   jid: string,
   content: Parameters<WASocket["sendMessage"]>[1],
+  options?: Parameters<WASocket["sendMessage"]>[2],
 ): Promise<WAMessage | undefined> {
-  const sent = await sock!.sendMessage(jid, content);
+  const s = sock!;
+  let opts = options;
+  if (!(s instanceof CloudApiSocket)) {
+    const messageId = generateMessageIDV2(s.user?.id);
+    trackSent({ id: messageId });
+    opts = { ...options, messageId };
+  }
+  const sent = await s.sendMessage(jid, content, opts);
   if (sent?.key) trackSent(sent.key);
   return sent;
 }
@@ -2389,6 +2412,37 @@ function wasSentByServer(id: string | null | undefined): boolean {
 // log line (the profile name is self-set data crossing into model-visible text).
 function ownerDisplayName(): string {
   return safeName(sock?.user?.name)?.trim() || "You (by hand)";
+}
+
+// The linked account's two identities: its phone jid and, on a current
+// account, its own @lid. Either may be "" (before the first `open`, or an
+// account with no lid).
+function ownJidForms(): [string, string] {
+  // Only a Baileys socket's user carries a lid; Cloud's is just the number.
+  const user = sock?.user;
+  const lid = user && "lid" in user ? user.lid : undefined;
+  return [ownJid, lid ? jidNormalizedUser(lid) : ""];
+}
+
+// The owner's own "Message yourself" chat. WhatsApp addresses it by the phone
+// jid or by the owner's own @lid depending on the path, so both forms count,
+// plus anything the lid map resolves to the owner's number. Fails closed
+// before the first `open`: with ownJid unknown, no chat is the self-chat, and
+// every fromMe message keeps the hand-reply rule.
+function isOwnSelfChat(remoteJid: string | null | undefined): boolean {
+  if (!ownJid || !remoteJid) return false;
+  if (
+    remoteJid.endsWith("@g.us") ||
+    remoteJid.endsWith("@broadcast") ||
+    remoteJid.endsWith("@newsletter")
+  )
+    return false;
+  const chat = jidNormalizedUser(remoteJid);
+  if (!chat) return false;
+  return (
+    ownJidForms().some((form) => form !== "" && form === chat) ||
+    isAllowedJid(chat, [ownJid])
+  );
 }
 
 // ─── Message stores (bounded) ──────────────────────────────────────────
@@ -3324,7 +3378,10 @@ mcp.setNotificationHandler(
       `👎 react or "no ${request_id}" to deny`;
     const owner = permissionTarget(access);
     if (sock && owner) {
-      const sent = await sock.sendMessage(owner, { text }).catch((e) => {
+      // sendTracked: in the note-to-self setup this lands in the owner's own
+      // chat, where an echo not recognised as ours would reach Claude as the
+      // owner's message.
+      const sent = await sendTracked(owner, { text }).catch((e) => {
         logDiag(`permission_request send to ${maskJid(owner)} failed: ${e}\n`);
         return undefined;
       });
@@ -3336,7 +3393,6 @@ mcp.setNotificationHandler(
           requestId: request_id,
           chatId: owner,
         });
-        trackSent(sent.key);
       }
     } else {
       // Fail closed, but SAY SO: permissionTarget returns nothing when the
@@ -3955,7 +4011,7 @@ const handleToolCall = async (
           const previewMentions = previewJids.length
             ? [...new Set(previewJids)]
             : undefined;
-          const sent = await sock.sendMessage(
+          const sent = await sendTracked(
             chat_id,
             {
               ...mentionContent(preview, mentionJids, tagAll, allByList),
@@ -3963,11 +4019,8 @@ const handleToolCall = async (
             },
             opts ?? undefined,
           );
-          if (sent?.key) {
-            trackSent(sent.key);
-            if (sent.key.id) sentIds.push(sent.key.id);
-          }
-          const docSent = await sock.sendMessage(chat_id, {
+          if (sent?.key?.id) sentIds.push(sent.key.id);
+          const docSent = await sendTracked(chat_id, {
             document: readFileSync(docPath),
             fileName: `response${ext}`,
             mimetype:
@@ -3977,10 +4030,7 @@ const handleToolCall = async (
                   ? "text/markdown"
                   : "text/plain",
           });
-          if (docSent?.key) {
-            trackSent(docSent.key);
-            if (docSent.key.id) sentIds.push(docSent.key.id);
-          }
+          if (docSent?.key?.id) sentIds.push(docSent.key.id);
           rmSync(docPath, { force: true });
         } else {
           const chunks = chunk(text, limit, mode);
@@ -3993,15 +4043,12 @@ const handleToolCall = async (
             const opts =
               shouldQuote && quotedMsg ? { quoted: quotedMsg } : undefined;
             const formatted = markdownToWhatsApp(chunks[i]);
-            const sent = await sock.sendMessage(
+            const sent = await sendTracked(
               chat_id,
               mentionContent(formatted, mentionJids, tagAll, allByList),
               opts ?? undefined,
             );
-            if (sent?.key) {
-              trackSent(sent.key);
-              if (sent.key.id) sentIds.push(sent.key.id);
-            }
+            if (sent?.key?.id) sentIds.push(sent.key.id);
           }
         }
 
@@ -4014,15 +4061,11 @@ const handleToolCall = async (
           const recordingGen = voiceNote ? typing.set(chat_id, "recording") : 0;
           let sent: WAMessage | undefined;
           try {
-            sent = (await sock.sendMessage(chat_id, content)) as
-              WAMessage | undefined;
+            sent = await sendTracked(chat_id, content);
           } finally {
             if (voiceNote) typing.stop(chat_id, true, recordingGen);
           }
-          if (sent?.key) {
-            trackSent(sent.key);
-            if (sent.key.id) sentIds.push(sent.key.id);
-          }
+          if (sent?.key?.id) sentIds.push(sent.key.id);
         }
 
         markReplied(chat_id, repliedIds);
@@ -4080,13 +4123,12 @@ const handleToolCall = async (
         // vote is sealed with is known before the send, whatever the returned
         // message does or does not carry.
         const secret = randomBytes(32);
-        const sent = await sock.sendMessage(chat_id, {
+        const sent = await sendTracked(chat_id, {
           poll: { ...spec, messageSecret: secret },
         });
         const pollId = sent?.key?.id;
         if (!sent || !pollId)
           throw new Error("WhatsApp did not return an id for the poll");
-        trackSent(sent.key);
         storeMessage(sent);
         addPoll(
           sentPolls,
@@ -5168,8 +5210,7 @@ async function handlePollVote(
   // A replayed vote (same message id) was already counted and delivered.
   if (msg.key.id && messageAlreadyLogged(msg.key.id)) return;
 
-  const self = sock.user;
-  const ownForms = [ownJid, self?.lid ? jidNormalizedUser(self.lid) : ""];
+  const ownForms = ownJidForms();
   const phone = resolveToPhone(voterJid);
   const voterForms = fromMe
     ? ownForms
@@ -5266,15 +5307,15 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   const pollUpdate = normalizeMessageContent(msg.message)?.pollUpdateMessage;
   if (pollUpdate) return handlePollVote(msg, pollUpdate, backlog);
   // fromMe: our own echo, or the owner typing on their phone.
+  let selfChat = false;
   if (msg.key.fromMe) {
     if (wasSentByServer(msg.key.id)) return;
     // Before the hand-reply path claims it. When the owner IS the linked
     // account the permission request lands in their note-to-self, so their
     // typed "yes <id>" arrives here rather than on the inbound route and was
     // logged as ordinary chat instead of answering anything. Only a claimed
-    // id is taken; every other fromMe message, "yes xxxxx" included, still
-    // falls through to logOwnerHandReply so unreplied clears and catch_up
-    // shows it.
+    // id is taken; every other fromMe message, "yes xxxxx" included, carries
+    // on below.
     if (
       !backlog &&
       tryClaimPermissionReply(
@@ -5284,7 +5325,29 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
       )
     )
       return;
-    return logOwnerHandReply(msg);
+    // In any other chat this is the owner answering someone by hand: logged
+    // so unreplied clears and catch_up shows it, never delivered.
+    if (!isOwnSelfChat(msg.key.remoteJid)) return logOwnerHandReply(msg);
+    // Their own "Message yourself" chat is where the owner talks TO Claude
+    // when the linked account is their own number. It used to go to
+    // logOwnerHandReply like every other fromMe message, which logs text as
+    // a hand reply and never notifies, and drops media outright, so typed
+    // commands and voice notes there never reached the session. It takes the
+    // inbound route below instead, with two checks that route does not need
+    // for other people's messages:
+    //  - Content only. The owner's own reactions (a 👍 on a permission
+    //    request), edits, deletes and the phone's sync stanzas all arrive
+    //    fromMe here too, and the inbound route sends the ack reaction and
+    //    "composing" before its own empty check.
+    //  - Once per id. A replay of a command already delivered must not be
+    //    delivered again (the Baileys inbound route has no such check, the
+    //    hand-reply path that used to own these messages did).
+    // The server's own sends into this chat stopped at wasSentByServer above:
+    // sendTracked records each id before the send, so no echo comes back here.
+    const content = normalizeMessageContent(msg.message) ?? msg.message;
+    if (!extractText(content) && !classifyMedia(content)) return;
+    if (msg.key.id && messageAlreadyLogged(msg.key.id)) return;
+    selfChat = true;
   }
   if (wasSentByServer(msg.key.id)) return;
 
@@ -5323,8 +5386,18 @@ async function handleMessage(msg: WAMessage, backlog = false): Promise<void> {
   // because our passive lid-mapping.update listener missed it.
   await ensureLidResolved(senderJid);
 
-  // Gate check
-  const result = gate(remoteJid, senderJid, text, mentionedJids, !backlog);
+  // Gate check. Never mints for the owner's own self-chat: a message the
+  // owner sent must not burn a pairing slot or get a "pairing required"
+  // reply (the rule logOwnerHandReply states). The owner is allowlisted on
+  // connect, so this only ever drops when access.json says so: DMs disabled,
+  // or the owner taken off the allowlist (static mode included).
+  const result = gate(
+    remoteJid,
+    senderJid,
+    text,
+    mentionedJids,
+    !backlog && !selfChat,
+  );
 
   if (result.action === "drop") {
     // resolveToPhone returns its INPUT when the lid is unmapped, so echoing it

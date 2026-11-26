@@ -113,6 +113,16 @@ To auto-allow only the WhatsApp tools, add them to your `~/.claude/settings.json
 }
 ```
 
+### Talking to Claude from your own chat
+
+When the linked device is your own number, your "Message yourself" chat (note-to-self) is a direct line to the session.
+Anything you type there, and any voice note you record there, reaches Claude like a message from an allowlisted contact: it is logged, counted in `unreplied`, and pushed into the session.
+Voice notes are transcribed the same way as everyone else's (see [Voice transcription](./README.md#voice-transcription-optional)); if transcription fails or is not set up, the note arrives as an attachment Claude can fetch with `download_attachment`.
+Claude's replies land in the same chat, and the server never treats them as new messages from you.
+A `yes <code>` or `no <code>` typed there still answers a pending permission request first, and is not passed on as chat.
+Your own reactions in that chat (a 👍 on a permission request, say) are not delivered.
+This needs your own number on the allowlist, which pairing does for you; with `dmPolicy` set to `disabled`, the chat is ignored like every other DM.
+
 ### Permission relay
 
 When Claude needs to run a tool that requires approval and no one is at the terminal, the request is forwarded to all allowlisted WhatsApp contacts. Reply `yes <code>` or `no <code>` from WhatsApp to approve or deny.
@@ -140,6 +150,8 @@ See **[ACCESS.md](./ACCESS.md)** for DM policies, groups, mention detection, del
 | `group_roster`        | List a group's members by saved name, or a masked number — never raw. Requires [roster access](./ACCESS.md#group-roster--all-mentions).                                                                                                                                                                                                                                                                                              |
 
 ### Your own replies
+
+Your "Message yourself" chat is the exception: what you send there is a message to Claude, not a reply (see [Talking to Claude from your own chat](#talking-to-claude-from-your-own-chat)).
 
 When you answer a chat from your phone instead of asking Claude to, the server logs that message
 too — but only for chats already on the allowlist (a DM from someone in `allowFrom`, or a group
@@ -324,6 +336,10 @@ broken statusline.
 **The message key/proto store is capped and FIFO, shared across every chat.** `download_attachment`, replies and lookups by `message_id` only work for messages still in this in-memory store. The default cap is 500 entries total — on a high-volume account (several active groups, hundreds of unread messages) that can churn through in minutes, so `download_attachment` can fail with `Message not found in store` well before the underlying media has actually expired on WhatsApp's side. Raise it with `WHATSAPP_MAX_STORE=5000` (or whatever fits your traffic) in the server's `.env` — each entry is just a message key plus a small proto, so a much larger cap costs negligible memory. Must be a positive integer; anything else (unset, non-numeric, fractional, zero, negative, `Infinity`) falls back to the 500 default.
 
 **Inbound message delivery is Claude Code only.** Messages are pushed into a session with `notifications/claude/channel`, which is a Claude Code extension, not part of MCP. Other MCP clients (Codex CLI, Gemini CLI, Cursor) drop unknown notifications silently, so there the plugin is poll-only: call `wait_for_messages`, `catch_up` or `unreplied` to see what arrived. Delivery inside Claude Code was broken by client bugs ([#37933](https://github.com/anthropics/claude-code/issues/37933), [#36477](https://github.com/anthropics/claude-code/issues/36477), [#37633](https://github.com/anthropics/claude-code/issues/37633)) and worked again when last checked on v2.1.235; if messages stop appearing, check those issues before suspecting this plugin.
+
+**One server per number.** Two servers linked to the same number (two machines each running the plugin against their own pairing) each see the other's replies in your "Message yourself" chat as messages you typed, and would answer each other there.
+Each server only recognises its own sends.
+Run the channel for a number on one machine; a second terminal on the same machine is fine, because it relays through the first.
 
 ## Resetting auth
 
